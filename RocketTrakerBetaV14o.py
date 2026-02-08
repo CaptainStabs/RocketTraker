@@ -1841,6 +1841,7 @@ class buttons:
         self.lastalt = ref_tel_alt + weighted_avg_alt_sep
         ####Do this if we're set to wait at the horizon mode###
         if trackSettings.trackingmode == 'Horizon':
+            startgoingtime = initialtime  # default if no horizon crossing is found
             if trackSettings.fileSelected is True:
                 df = pd.read_csv(trackSettings.trajFile, sep=',', encoding="utf-8")
                 altlist1 = []
