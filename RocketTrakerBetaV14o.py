@@ -28,6 +28,9 @@ from PIL import Image as PILImage, ImageTk
 from urllib.request import urlopen
 import rocketplanetarium
 
+# Serialize OpenCV use across threads to avoid PyEval_RestoreThread: NULL tstate crash
+_cv2_lock = threading.Lock()
+
 class trackSettings:
     
     objectfollow = False
@@ -120,14 +123,19 @@ class KalmanFilter:
 
     def Estimate(self, coordX, coordY):
         ''' This function estimates the position of the object'''
-        measured = np.array([[np.float32(coordX)], [np.float32(coordY)]])
-        self.kf.correct(measured)
-        predicted = self.kf.predict()
-        return predicted
+        with _cv2_lock:
+            measured = np.array([[np.float32(coordX)], [np.float32(coordY)]])
+            self.kf.correct(measured)
+            predicted = self.kf.predict()
+            return predicted
 
 class videotrak:
     
     def get_x_y(img, roibox, imageroi):
+        with _cv2_lock:
+            return videotrak._get_x_y_impl(img, roibox, imageroi)
+
+    def _get_x_y_impl(img, roibox, imageroi):
         img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         if trackSettings.trackingtype == 'Features':
             clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(2,2))
@@ -188,9 +196,8 @@ class videotrak:
             #print(finalroidiff)
             #figure out if the difference from roi is low enough to be acceptable
             if finalroidiff < 35:
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('s'):
-                    need_track_feature = True
+                # Avoid cv2.waitKey(1) here - not needed with Tkinter and can cause
+                # PyEval_RestoreThread: NULL tstate when used with other threads.
                 searchx1last = searchx2
                 searchy1last = searchy2
                 learnimg = img[searchy1last:(searchy1last+roiheight),searchx1last:(searchx1last+roiwidth)]
@@ -1834,6 +1841,7 @@ class buttons:
         self.lastalt = ref_tel_alt + weighted_avg_alt_sep
         ####Do this if we're set to wait at the horizon mode###
         if trackSettings.trackingmode == 'Horizon':
+            startgoingtime = initialtime  # default if no horizon crossing is found
             if trackSettings.fileSelected is True:
                 df = pd.read_csv(trackSettings.trajFile, sep=',', encoding="utf-8")
                 altlist1 = []
