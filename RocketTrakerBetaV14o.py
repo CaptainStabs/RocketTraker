@@ -1791,6 +1791,45 @@ class buttons:
     def run_launch(self):
         self.t0 = self.entryNET.get()
         self.t0 = datetime.datetime.strptime(self.t0, '%Y-%m-%dT%H:%M:%SZ')
+        self.horizon_slew_done_at_countdown = False
+        self.horizon_rise_time = None
+        # In Horizon mode: slew to interception point at countdown start so scope is ready; show "Rising in" during countdown
+        if trackSettings.trackingmode == 'Horizon' and trackSettings.fileSelected and trackSettings.cancelLaunch is False:
+            try:
+                df = pd.read_csv(trackSettings.trajFile, sep=',', encoding="utf-8")
+                self.horizonalt = -999
+                horizonaz = -999
+                waittime = 0
+                for index, row in df.iterrows():
+                    rowalt = float(row['elevationDegs'])
+                    refraction = self.atm_refraction(rowalt)
+                    rowalt = rowalt + refraction
+                    if rowalt > trackSettings.horizonaltitude and self.horizonalt < -990:
+                        waittime = row['time']
+                        self.horizon_rise_time = self.t0 + datetime.timedelta(seconds=waittime)
+                        thisrowalt = float(row['elevationDegs'])
+                        refraction = self.atm_refraction(thisrowalt)
+                        self.horizonalt = thisrowalt + refraction
+                        horizonaz = row['azimuthDegs']
+                        launchobserver = ephem.Observer()
+                        launchobserver.lat = (str(self.entryLat.get()))
+                        launchobserver.lon = (str(self.entryLon.get()))
+                        launchobserver.date = datetime.datetime.utcnow()
+                        launchobserver.pressure = 0
+                        launchobserver.epoch = launchobserver.date
+                        raslew, decslew = launchobserver.radec_of(math.radians(horizonaz), math.radians(self.horizonalt))
+                        self.textbox.insert(END, str('Slew to interception: Alt ' + str(round(self.horizonalt,2)) + ' Az ' + str(round(horizonaz,2)) + ' (Rising in ' + str(round(waittime)) + 's)\n'))
+                        self.textbox.see('end')
+                        self.raslew = raslew
+                        self.decslew = decslew
+                        trackSettings.goforSlew = True
+                        self.ASCOMSlewThread = threading.Thread(target=self.ASCOMSlew, daemon=True)
+                        self.ASCOMSlewThread.start()
+                        self.horizon_slew_done_at_countdown = True
+                        break
+            except Exception as e:
+                self.horizon_slew_done_at_countdown = False
+                self.horizon_rise_time = None
         currenttime = datetime.datetime.utcnow()
         countdown = (self.t0 - currenttime).total_seconds()
         while trackSettings.buttonpushed is False and trackSettings.runninglaunch is True:
@@ -1799,7 +1838,17 @@ class buttons:
             hours = countdown // 3600
             minutes = (countdown % 3600) // 60
             seconds = countdown % 60
-            self.countdowntext.set(str('t- '+str(math.trunc(hours))+' hours '+str(math.trunc(minutes))+' minutes '+str(math.trunc(seconds))+' seconds'))
+            if trackSettings.trackingmode == 'Horizon' and self.horizon_rise_time is not None:
+                rising_in = (self.horizon_rise_time - currenttime).total_seconds()
+                if rising_in > 0:
+                    rh = rising_in // 3600
+                    rm = (rising_in % 3600) // 60
+                    rs = rising_in % 60
+                    self.countdowntext.set(str('Rising in: '+str(math.trunc(rh))+' hours '+str(math.trunc(rm))+' minutes '+str(math.trunc(rs))+' seconds'))
+                else:
+                    self.countdowntext.set(str('t- '+str(math.trunc(hours))+' hours '+str(math.trunc(minutes))+' minutes '+str(math.trunc(seconds))+' seconds'))
+            else:
+                self.countdowntext.set(str('t- '+str(math.trunc(hours))+' hours '+str(math.trunc(minutes))+' minutes '+str(math.trunc(seconds))+' seconds'))
             time.sleep(0.01)
             self.altrateout = 0.0 
             self.azrateout = 0.0
@@ -1857,19 +1906,23 @@ class buttons:
         self.lastalt = ref_tel_alt + weighted_avg_alt_sep
         ####Do this if we're set to wait at the horizon mode###
         if trackSettings.trackingmode == 'Horizon':
-            startgoingtime = initialtime  # default if no horizon crossing is found
+            if getattr(self, 'horizon_slew_done_at_countdown', False) and self.horizon_rise_time is not None:
+                startgoingtime = self.horizon_rise_time  # already slew to interception at countdown start
+            else:
+                startgoingtime = initialtime  # default if no horizon crossing is found
             if trackSettings.fileSelected is True:
                 df = pd.read_csv(trackSettings.trajFile, sep=',', encoding="utf-8")
                 altlist1 = []
                 azlist1 = []
                 timelist = []
                 ####################NEED TO LOCATE WHERE IT WILL HIT THE HORIZON AND WAIT THERE!
-                self.horizonalt = -999
+                if not getattr(self, 'horizon_slew_done_at_countdown', False):
+                    self.horizonalt = -999
                 horizonaz = -999
                 waittime = 0
                 for index, row in df.iterrows():
                     timelist.append(row['time'])
-                    #Find the row that it rises on horizon and slew there
+                    #Find the row that it rises on horizon and slew there (skip if already slew at countdown start)
                     rowalt = float(row['elevationDegs'])
                     refraction = self.atm_refraction(rowalt)
                     rowalt = rowalt+refraction
@@ -1880,26 +1933,27 @@ class buttons:
                         refraction = self.atm_refraction(thisrowalt)
                         self.horizonalt = thisrowalt+refraction
                         horizonaz = row['azimuthDegs']
-                        #Slew to pad location
-                        launchobserver = ephem.Observer()
-                        launchobserver.lat = (str(self.entryLat.get()))
-                        launchobserver.lon = (str(self.entryLon.get()))
-                        launchobserver.date = datetime.datetime.utcnow()
-                        launchobserver.pressure = 0
-                        launchobserver.epoch = launchobserver.date
-                        raslew, decslew = launchobserver.radec_of(math.radians(horizonaz), math.radians(self.horizonalt))
-                        self.textbox.insert(END, str('Slew Alt: ' + str(round(self.horizonalt,2)) + ' Slew Az: ' + str(round(horizonaz,2)) +' Slew RA: ' + str(round((math.degrees(raslew)/15),2))+' hrs Slew Dec: ' + str(round(math.degrees(decslew),2))+'\n'))
-                        self.textbox.see('end')
-                        self.raslew = raslew
-                        self.decslew = decslew
-                        trackSettings.goforSlew = True
-                        self.ASCOMSlewThread = threading.Thread(target=self.ASCOMSlew, daemon=True)
-                        self.ASCOMSlewThread.start()
-                        #self.tel.SlewToCoordinates((math.degrees(raslew)/15),math.degrees(decslew))
-                        while trackSettings.slewCompleted is False:
-                            time.sleep(0.01)
-                        self.tel.MoveAxis(0, 0)
-                        self.tel.MoveAxis(1, 0)
+                        #Slew to interception point only if we didn't already do it at countdown start
+                        if not getattr(self, 'horizon_slew_done_at_countdown', False):
+                            launchobserver = ephem.Observer()
+                            launchobserver.lat = (str(self.entryLat.get()))
+                            launchobserver.lon = (str(self.entryLon.get()))
+                            launchobserver.date = datetime.datetime.utcnow()
+                            launchobserver.pressure = 0
+                            launchobserver.epoch = launchobserver.date
+                            raslew, decslew = launchobserver.radec_of(math.radians(horizonaz), math.radians(self.horizonalt))
+                            self.textbox.insert(END, str('Slew Alt: ' + str(round(self.horizonalt,2)) + ' Slew Az: ' + str(round(horizonaz,2)) +' Slew RA: ' + str(round((math.degrees(raslew)/15),2))+' hrs Slew Dec: ' + str(round(math.degrees(decslew),2))+'\n'))
+                            self.textbox.see('end')
+                            self.raslew = raslew
+                            self.decslew = decslew
+                            trackSettings.goforSlew = True
+                            self.ASCOMSlewThread = threading.Thread(target=self.ASCOMSlew, daemon=True)
+                            self.ASCOMSlewThread.start()
+                            #self.tel.SlewToCoordinates((math.degrees(raslew)/15),math.degrees(decslew))
+                            while trackSettings.slewCompleted is False:
+                                time.sleep(0.01)
+                            self.tel.MoveAxis(0, 0)
+                            self.tel.MoveAxis(1, 0)
                     thisrowalt = float(row['elevationDegs'])
                     refraction = self.atm_refraction(thisrowalt)
                     thisrowalt = thisrowalt+refraction
@@ -2043,8 +2097,8 @@ class buttons:
                     else:
                         if self.remotejoybutton2 > 0:
                             startgoingtime = currenttime
-                    if self.horizonalt < -990:
-                        #Slew to new waiting spot and get new startgoing time
+                    if self.horizonalt < -990 and not getattr(self, 'horizon_slew_done_at_countdown', False):
+                        #Slew to new waiting spot and get new startgoing time (skip if already slew at countdown start)
                         df = pd.read_csv(trackSettings.trajFile, sep=',', encoding="utf-8")
                         altlist1 = []
                         azlist1 = []
