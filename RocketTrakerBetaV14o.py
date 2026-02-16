@@ -324,6 +324,7 @@ class buttons:
         return(fullycorrectedRA, fullycorrectedDec)
     
     def __init__(self, master):
+        self.master = master
         trackSettings.screen_width = root.winfo_screenwidth()
         trackSettings.screen_height = root.winfo_screenheight()
         self.starmapsize = round(trackSettings.screen_height*0.6)
@@ -347,6 +348,7 @@ class buttons:
         self.new_msg = True
         
         self.collect_images = False
+        self._after_id = None
         self.topframe = Frame(master)
         master.winfo_toplevel().title("RocketTraker")
         self.topframe.pack(side=TOP)
@@ -369,13 +371,11 @@ class buttons:
 
         self.labelLat = Label(self.bottomframe, text='Latitude (N+)')
         self.labelLat.grid(row=5, column = 0)
-        self.entryLat = Entry(self.bottomframe)
-        #self.entryLat = Entry(self.bottomframe, show='*')
+        self.entryLat = Entry(self.bottomframe, show='*')
         self.entryLat.grid(row = 5, column = 1)
         self.labelLon = Label(self.bottomframe, text='Longitude (E+)')
         self.labelLon.grid(row=6, column = 0)
-        self.entryLon = Entry(self.bottomframe)
-        #self.entryLon = Entry(self.bottomframe, show='*')
+        self.entryLon = Entry(self.bottomframe, show='*')
         self.entryLon.grid(row = 6, column = 1)
         self.joyxrev = IntVar()
         self.joyyrev = IntVar()
@@ -1433,7 +1433,7 @@ class buttons:
             self.raslew = raslew
             self.decslew = decslew
             trackSettings.goforSlew = True
-            self.ASCOMSlewThread = threading.Thread(target=self.ASCOMSlew)
+            self.ASCOMSlewThread = threading.Thread(target=self.ASCOMSlew, daemon=True)
             self.ASCOMSlewThread.start()
             #self.tel.SlewToCoordinates((math.degrees(raslew)/15),math.degrees(decslew))
             
@@ -1445,7 +1445,7 @@ class buttons:
         if trackSettings.renderStarMap is False:
             trackSettings.renderStarMap = True
             self.renderMapButton.configure(text='Pause All Sky View')
-            self.renderMapThread = threading.Thread(target=self.render_starMap)
+            self.renderMapThread = threading.Thread(target=self.render_starMap, daemon=True)
             self.renderMapThread.start()
         else:
             self.renderMapButton.configure(text='Render All Sky View')
@@ -1553,7 +1553,7 @@ class buttons:
                 self.host = socket.gethostbyname(self.entryIP.get())
                 self.remotejoystick.connect((self.host, 3933))
                 trackSettings.joystickconnected = True
-                self.get_remote_joy_data = threading.Thread(target=self.get_joy)
+                self.get_remote_joy_data = threading.Thread(target=self.get_joy, daemon=True)
                 self.get_remote_joy_data.start()
                 self.remotejoyButton.configure(text="Remote Joystick Connected")
             except Exception as e:
@@ -1619,7 +1619,7 @@ class buttons:
                 self.host = socket.gethostbyname(self.entryIP.get())
                 self.remotejoystick.connect((self.host, 3933))
                 trackSettings.joystickconnected = True
-                self.get_remote_joy_data = threading.Thread(target=self.get_joy)
+                self.get_remote_joy_data = threading.Thread(target=self.get_joy, daemon=True)
                 self.get_remote_joy_data.start()
                 
     def chup(self, event):
@@ -1659,6 +1659,12 @@ class buttons:
         trackSettings.rotate = 180
         
     def exitProg(self):
+        if getattr(self, '_after_id', None) is not None:
+            try:
+                self.master.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
         config = open('rocketconfig.txt','w')
         config.write(str(trackSettings.telescopetype)+'\n')
         config.write(str(self.entryCom.get()) + '\n')
@@ -1694,9 +1700,17 @@ class buttons:
         config.write(str(trackSettings.aggression) + '\n')
         config.write(str(trackSettings.screenshrink) + '\n')
         config.close()
-        if self.recordvideo.get() == 1:
+        if getattr(self, 'cap', None) is not None:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+        cv2.destroyAllWindows()
+        if getattr(self, 'recordvideo', None) and self.recordvideo.get() == 1:
             self.out.release()
-        sys.exit()
+        self.master.quit()
+        self.master.destroy()
+        sys.exit(0)
     
     def start_spiral_search(self):
         if trackSettings.spiralSearch is False:
@@ -1732,9 +1746,9 @@ class buttons:
             else:
                 if trackSettings.joystickconnected is False:
                     self.joysticks[0].init()
-                self.simcalc = threading.Thread(target=self.run_sim)
+                self.simcalc = threading.Thread(target=self.run_sim, daemon=True)
                 self.simcalc.start()
-                self.simthread = threading.Thread(target=self.simulate_launch)
+                self.simthread = threading.Thread(target=self.simulate_launch, daemon=True)
                 self.simulateButton.configure(text='Stop Simulation')
                 self.simthread.start()
             
@@ -1755,9 +1769,9 @@ class buttons:
             else:
                 if trackSettings.joystickconnected is False:
                     self.joysticks[0].init()
-                self.simcalc = threading.Thread(target=self.simulate_launch)
+                self.simcalc = threading.Thread(target=self.simulate_launch, daemon=True)
                 self.simcalc.start()
-                self.launchthread = threading.Thread(target=self.run_launch)
+                self.launchthread = threading.Thread(target=self.run_launch, daemon=True)
                 self.launchButton.configure(text='Disarm Launch Tracking')
                 self.launchthread.start()
         elif trackSettings.fileSelected is False:
@@ -1775,6 +1789,45 @@ class buttons:
     def run_launch(self):
         self.t0 = self.entryNET.get()
         self.t0 = datetime.datetime.strptime(self.t0, '%Y-%m-%dT%H:%M:%SZ')
+        self.horizon_slew_done_at_countdown = False
+        self.horizon_rise_time = None
+        # In Horizon mode: slew to interception point at countdown start so scope is ready; show "Rising in" during countdown
+        if trackSettings.trackingmode == 'Horizon' and trackSettings.fileSelected and trackSettings.cancelLaunch is False:
+            try:
+                df = pd.read_csv(trackSettings.trajFile, sep=',', encoding="utf-8")
+                self.horizonalt = -999
+                horizonaz = -999
+                waittime = 0
+                for index, row in df.iterrows():
+                    rowalt = float(row['elevationDegs'])
+                    refraction = self.atm_refraction(rowalt)
+                    rowalt = rowalt + refraction
+                    if rowalt > trackSettings.horizonaltitude and self.horizonalt < -990:
+                        waittime = row['time']
+                        self.horizon_rise_time = self.t0 + datetime.timedelta(seconds=waittime)
+                        thisrowalt = float(row['elevationDegs'])
+                        refraction = self.atm_refraction(thisrowalt)
+                        self.horizonalt = thisrowalt + refraction
+                        horizonaz = row['azimuthDegs']
+                        launchobserver = ephem.Observer()
+                        launchobserver.lat = (str(self.entryLat.get()))
+                        launchobserver.lon = (str(self.entryLon.get()))
+                        launchobserver.date = datetime.datetime.utcnow()
+                        launchobserver.pressure = 0
+                        launchobserver.epoch = launchobserver.date
+                        raslew, decslew = launchobserver.radec_of(math.radians(horizonaz), math.radians(self.horizonalt))
+                        self.textbox.insert(END, str('Slew to interception: Alt ' + str(round(self.horizonalt,2)) + ' Az ' + str(round(horizonaz,2)) + ' (Rising in ' + str(round(waittime)) + 's)\n'))
+                        self.textbox.see('end')
+                        self.raslew = raslew
+                        self.decslew = decslew
+                        trackSettings.goforSlew = True
+                        self.ASCOMSlewThread = threading.Thread(target=self.ASCOMSlew, daemon=True)
+                        self.ASCOMSlewThread.start()
+                        self.horizon_slew_done_at_countdown = True
+                        break
+            except Exception as e:
+                self.horizon_slew_done_at_countdown = False
+                self.horizon_rise_time = None
         currenttime = datetime.datetime.utcnow()
         countdown = (self.t0 - currenttime).total_seconds()
         while trackSettings.buttonpushed is False and trackSettings.runninglaunch is True:
@@ -1783,7 +1836,17 @@ class buttons:
             hours = countdown // 3600
             minutes = (countdown % 3600) // 60
             seconds = countdown % 60
-            self.countdowntext.set(str('t- '+str(math.trunc(hours))+' hours '+str(math.trunc(minutes))+' minutes '+str(math.trunc(seconds))+' seconds'))
+            if trackSettings.trackingmode == 'Horizon' and self.horizon_rise_time is not None:
+                rising_in = (self.horizon_rise_time - currenttime).total_seconds()
+                if rising_in > 0:
+                    rh = rising_in // 3600
+                    rm = (rising_in % 3600) // 60
+                    rs = rising_in % 60
+                    self.countdowntext.set(str('Rising in: '+str(math.trunc(rh))+' hours '+str(math.trunc(rm))+' minutes '+str(math.trunc(rs))+' seconds'))
+                else:
+                    self.countdowntext.set(str('t- '+str(math.trunc(hours))+' hours '+str(math.trunc(minutes))+' minutes '+str(math.trunc(seconds))+' seconds'))
+            else:
+                self.countdowntext.set(str('t- '+str(math.trunc(hours))+' hours '+str(math.trunc(minutes))+' minutes '+str(math.trunc(seconds))+' seconds'))
             time.sleep(0.01)
             self.altrateout = 0.0 
             self.azrateout = 0.0
@@ -1841,19 +1904,23 @@ class buttons:
         self.lastalt = ref_tel_alt + weighted_avg_alt_sep
         ####Do this if we're set to wait at the horizon mode###
         if trackSettings.trackingmode == 'Horizon':
-            startgoingtime = initialtime  # default if no horizon crossing is found
+            if getattr(self, 'horizon_slew_done_at_countdown', False) and self.horizon_rise_time is not None:
+                startgoingtime = self.horizon_rise_time  # already slew to interception at countdown start
+            else:
+                startgoingtime = initialtime  # default if no horizon crossing is found
             if trackSettings.fileSelected is True:
                 df = pd.read_csv(trackSettings.trajFile, sep=',', encoding="utf-8")
                 altlist1 = []
                 azlist1 = []
                 timelist = []
                 ####################NEED TO LOCATE WHERE IT WILL HIT THE HORIZON AND WAIT THERE!
-                self.horizonalt = -999
+                if not getattr(self, 'horizon_slew_done_at_countdown', False):
+                    self.horizonalt = -999
                 horizonaz = -999
                 waittime = 0
                 for index, row in df.iterrows():
                     timelist.append(row['time'])
-                    #Find the row that it rises on horizon and slew there
+                    #Find the row that it rises on horizon and slew there (skip if already slew at countdown start)
                     rowalt = float(row['elevationDegs'])
                     refraction = self.atm_refraction(rowalt)
                     rowalt = rowalt+refraction
@@ -1864,26 +1931,27 @@ class buttons:
                         refraction = self.atm_refraction(thisrowalt)
                         self.horizonalt = thisrowalt+refraction
                         horizonaz = row['azimuthDegs']
-                        #Slew to pad location
-                        launchobserver = ephem.Observer()
-                        launchobserver.lat = (str(self.entryLat.get()))
-                        launchobserver.lon = (str(self.entryLon.get()))
-                        launchobserver.date = datetime.datetime.utcnow()
-                        launchobserver.pressure = 0
-                        launchobserver.epoch = launchobserver.date
-                        raslew, decslew = launchobserver.radec_of(math.radians(horizonaz), math.radians(self.horizonalt))
-                        self.textbox.insert(END, str('Slew Alt: ' + str(round(self.horizonalt,2)) + ' Slew Az: ' + str(round(horizonaz,2)) +' Slew RA: ' + str(round((math.degrees(raslew)/15),2))+' hrs Slew Dec: ' + str(round(math.degrees(decslew),2))+'\n'))
-                        self.textbox.see('end')
-                        self.raslew = raslew
-                        self.decslew = decslew
-                        trackSettings.goforSlew = True
-                        self.ASCOMSlewThread = threading.Thread(target=self.ASCOMSlew)
-                        self.ASCOMSlewThread.start()
-                        #self.tel.SlewToCoordinates((math.degrees(raslew)/15),math.degrees(decslew))
-                        while trackSettings.slewCompleted is False:
-                            time.sleep(0.01)
-                        self.tel.MoveAxis(0, 0)
-                        self.tel.MoveAxis(1, 0)
+                        #Slew to interception point only if we didn't already do it at countdown start
+                        if not getattr(self, 'horizon_slew_done_at_countdown', False):
+                            launchobserver = ephem.Observer()
+                            launchobserver.lat = (str(self.entryLat.get()))
+                            launchobserver.lon = (str(self.entryLon.get()))
+                            launchobserver.date = datetime.datetime.utcnow()
+                            launchobserver.pressure = 0
+                            launchobserver.epoch = launchobserver.date
+                            raslew, decslew = launchobserver.radec_of(math.radians(horizonaz), math.radians(self.horizonalt))
+                            self.textbox.insert(END, str('Slew Alt: ' + str(round(self.horizonalt,2)) + ' Slew Az: ' + str(round(horizonaz,2)) +' Slew RA: ' + str(round((math.degrees(raslew)/15),2))+' hrs Slew Dec: ' + str(round(math.degrees(decslew),2))+'\n'))
+                            self.textbox.see('end')
+                            self.raslew = raslew
+                            self.decslew = decslew
+                            trackSettings.goforSlew = True
+                            self.ASCOMSlewThread = threading.Thread(target=self.ASCOMSlew, daemon=True)
+                            self.ASCOMSlewThread.start()
+                            #self.tel.SlewToCoordinates((math.degrees(raslew)/15),math.degrees(decslew))
+                            while trackSettings.slewCompleted is False:
+                                time.sleep(0.01)
+                            self.tel.MoveAxis(0, 0)
+                            self.tel.MoveAxis(1, 0)
                     thisrowalt = float(row['elevationDegs'])
                     refraction = self.atm_refraction(thisrowalt)
                     thisrowalt = thisrowalt+refraction
@@ -2003,7 +2071,7 @@ class buttons:
                             trackSettings.feedingdata = False
                             self.launchButton.configure(text='Arm Launch Tracking')
                             trackSettings.joytracking = True
-                            self.trackthread = threading.Thread(target=self.track)
+                            self.trackthread = threading.Thread(target=self.track, daemon=True)
                             self.startButton4.configure(text='Stop Joystick Tracking')
                             self.trackthread.start()
                         if math.isinf(altrate) or math.isinf(azrate):
@@ -2027,8 +2095,8 @@ class buttons:
                     else:
                         if self.remotejoybutton2 > 0:
                             startgoingtime = currenttime
-                    if self.horizonalt < -990:
-                        #Slew to new waiting spot and get new startgoing time
+                    if self.horizonalt < -990 and not getattr(self, 'horizon_slew_done_at_countdown', False):
+                        #Slew to new waiting spot and get new startgoing time (skip if already slew at countdown start)
                         df = pd.read_csv(trackSettings.trajFile, sep=',', encoding="utf-8")
                         altlist1 = []
                         azlist1 = []
@@ -2059,7 +2127,7 @@ class buttons:
                                 self.raslew = raslew
                                 self.decslew = decslew
                                 trackSettings.goforSlew = True
-                                self.ASCOMSlewThread = threading.Thread(target=self.ASCOMSlew)
+                                self.ASCOMSlewThread = threading.Thread(target=self.ASCOMSlew, daemon=True)
                                 self.ASCOMSlewThread.start()
                                 #self.tel.SlewToCoordinates((math.degrees(raslew)/15),math.degrees(decslew))
                                 while trackSettings.slewCompleted is False:
@@ -2209,7 +2277,7 @@ class buttons:
                         trackSettings.feedingdata = False
                         self.launchButton.configure(text='Arm Launch Tracking')
                         trackSettings.joytracking = True
-                        self.trackthread = threading.Thread(target=self.track)
+                        self.trackthread = threading.Thread(target=self.track, daemon=True)
                         self.startButton4.configure(text='Stop Joystick Tracking')
                         self.trackthread.start()
                     if math.isinf(altrate) or math.isinf(azrate):
@@ -2340,7 +2408,7 @@ class buttons:
                     trackSettings.feedingdata = False
                     self.launchButton.configure(text='Arm Launch Tracking')
                     trackSettings.joytracking = True
-                    self.trackthread = threading.Thread(target=self.track)
+                    self.trackthread = threading.Thread(target=self.track, daemon=True)
                     self.startButton4.configure(text='Stop Joystick Tracking')
                     self.trackthread.start()
                 if math.isinf(altrate) or math.isinf(azrate):
@@ -2421,7 +2489,7 @@ class buttons:
                 trackSettings.feedingdata = False
                 self.simulateButton.configure(text='Simulate Launch')
                 trackSettings.joytracking = True
-                self.trackthread = threading.Thread(target=self.track)
+                self.trackthread = threading.Thread(target=self.track, daemon=True)
                 self.startButton4.configure(text='Stop Joystick Tracking')
                 self.trackthread.start()
             if math.isinf(altrate) or math.isinf(azrate):
@@ -3393,7 +3461,7 @@ class buttons:
         elif len(self.joysticks) > 0 and trackSettings.joystickconnected is False:
             self.joysticks[0].init()
         if trackSettings.tracking is True and self.collect_images is True and trackSettings.joytracking is True:
-            self.trackthread = threading.Thread(target=self.track)
+            self.trackthread = threading.Thread(target=self.track, daemon=True)
             self.startButton4.configure(text='Stop Joystick Tracking')
             self.trackthread.start()
         
@@ -4483,7 +4551,7 @@ class buttons:
             self.cap = cv2.VideoCapture(int(self.entryCam.get()))
             self.displayimg = Label(self.topframe, bg="black")
             self.startButton.configure(text='Stop Camera')
-            imagethread = threading.Thread(target=self.prepare_img_for_tkinter)
+            imagethread = threading.Thread(target=self.prepare_img_for_tkinter, daemon=True)
             imagethread.start()
         else:
             self.cap.release()
@@ -4686,7 +4754,7 @@ class buttons:
         self.dec_s = (((abs(self.decdeg) - abs(self.dec_d))*60) - abs(self.dec_m))*60
     
     def start_calibration(self):
-        calibthread = threading.Thread(target=self.set_calibration)
+        calibthread = threading.Thread(target=self.set_calibration, daemon=True)
         calibthread.start()
     
     def set_calibration(self):
@@ -5140,7 +5208,7 @@ class buttons:
                 self.displayimg.config(image=self.tkimg)
                 self.displayimg.img = self.tkimg
                 self.displayimg.grid(row = 0, column = 0)
-            After = root.after(10,self.prepare_img_for_tkinter)
+            self._after_id = root.after(10, self.prepare_img_for_tkinter)
         else:
             print('Stopping Camera.')
             self.textbox.insert(END, str('Stopping Camera.\n'))
@@ -5149,4 +5217,5 @@ class buttons:
 After = None
 root = Tk()
 b = buttons(root)
+root.protocol("WM_DELETE_WINDOW", b.exitProg)
 root.mainloop()
