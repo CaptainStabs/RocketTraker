@@ -1793,13 +1793,31 @@ class buttons:
         self.t0 = datetime.datetime.strptime(self.t0, '%Y-%m-%dT%H:%M:%SZ')
         currenttime = datetime.datetime.utcnow()
         countdown = (self.t0 - currenttime).total_seconds()
+        self.horizon_rise_time = None
+        # Calculate horizon rise time before countdown so it can be displayed during countdown
+        if trackSettings.trackingmode == 'Horizon' and trackSettings.fileSelected:
+            try:
+                df = pd.read_csv(trackSettings.trajFile, sep=',', encoding="utf-8")
+                for index, row in df.iterrows():
+                    rowalt = float(row['elevationDegs'])
+                    refraction = self.atm_refraction(rowalt)
+                    rowalt = rowalt + refraction
+                    if rowalt > trackSettings.horizonaltitude:
+                        waittime = row['time']
+                        # Use t0 as launch time for countdown display
+                        self.horizon_rise_time = self.t0 + datetime.timedelta(seconds=waittime)
+                        break
+            except Exception as e:
+                self.horizon_rise_time = None
         while trackSettings.buttonpushed is False and trackSettings.runninglaunch is True:
             currenttime = datetime.datetime.utcnow()
             countdown = (self.t0 - currenttime).total_seconds()
             hours = countdown // 3600
             minutes = (countdown % 3600) // 60
             seconds = countdown % 60
+            # Before launch always show t- (time to launch). "Rising in" only shows after t=0 in the Horizon waiting loop.
             self.countdowntext.set(str('t- '+str(math.trunc(hours))+' hours '+str(math.trunc(minutes))+' minutes '+str(math.trunc(seconds))+' seconds'))
+
             time.sleep(0.01)
             self.altrateout = 0.0 
             self.azrateout = 0.0
@@ -1876,6 +1894,8 @@ class buttons:
                     if rowalt > trackSettings.horizonaltitude and self.horizonalt < -990 and trackSettings.cancelLaunch is False:
                         waittime = row['time']
                         startgoingtime = initialtime + datetime.timedelta(seconds=waittime)
+                        # Set horizon_rise_time for display purposes
+                        self.horizon_rise_time = initialtime + datetime.timedelta(seconds=waittime)
                         thisrowalt = float(row['elevationDegs'])
                         refraction = self.atm_refraction(thisrowalt)
                         self.horizonalt = thisrowalt+refraction
@@ -2031,11 +2051,19 @@ class buttons:
                     except:
                         pass
                 else:
-                    timedelta = (startgoingtime - currenttime).total_seconds()
-                    hours = timedelta // 3600
-                    minutes = (timedelta % 3600) // 60
-                    seconds = timedelta % 60
-                    self.countdowntext.set(str('Rising in: '+str(math.trunc(hours))+' hours '+str(math.trunc(minutes))+' minutes '+str(math.trunc(seconds))+' seconds'))
+                    # Use horizon_rise_time if available for accurate display, otherwise fall back to startgoingtime
+                    if self.horizon_rise_time is not None:
+                        timedelta = (self.horizon_rise_time - currenttime).total_seconds()
+                    else:
+                        timedelta = (startgoingtime - currenttime).total_seconds()
+                    if timedelta > 0:
+                        hours = timedelta // 3600
+                        minutes = (timedelta % 3600) // 60
+                        seconds = timedelta % 60
+                        self.countdowntext.set(str('Rising in: '+str(math.trunc(hours))+' hours '+str(math.trunc(minutes))+' minutes '+str(math.trunc(seconds))+' seconds'))
+                    else:
+                        # Past rise time, should have transitioned to tracking - show 0 or transition message
+                        self.countdowntext.set(str('Rising in: 0 hours 0 minutes 0 seconds'))
                     if trackSettings.joystickconnected is False:
                         pygame.event.pump()
                         if self.joysticks[0].get_button(trackSettings.starttrackbutton) > 0:
